@@ -57,7 +57,7 @@ class BasicConfig(BaseModel):
     browser_engine: str = Field(default="dp", description="浏览器引擎：uc 或 dp")
     browser_headless: bool = Field(default=False, description="自动化浏览器无头模式")
     refresh_window_hours: int = Field(default=1, ge=0, le=24, description="过期刷新窗口（小时）")
-    register_default_count: int = Field(default=1, ge=1, le=30, description="默认注册数量")
+    register_default_count: int = Field(default=1, ge=1, description="默认注册数量")
     register_domain: str = Field(default="", description="默认注册域名（推荐）")
 
 
@@ -71,6 +71,18 @@ class ImageGenerationConfig(BaseModel):
     output_format: str = Field(default="base64", description="图片输出格式：base64 或 url")
 
 
+class VideoGenerationConfig(BaseModel):
+    """视频生成配置"""
+    output_format: str = Field(default="html", description="视频输出格式：html/url/markdown")
+
+    @validator("output_format")
+    def validate_output_format(cls, v):
+        allowed = ["html", "url", "markdown"]
+        if v not in allowed:
+            raise ValueError(f"output_format 必须是 {allowed} 之一")
+        return v
+
+
 class RetryConfig(BaseModel):
     """重试策略配置"""
     max_new_session_tries: int = Field(default=5, ge=1, le=20, description="新会话尝试账户数")
@@ -78,7 +90,7 @@ class RetryConfig(BaseModel):
     max_account_switch_tries: int = Field(default=5, ge=1, le=20, description="账户切换尝试次数")
     account_failure_threshold: int = Field(default=3, ge=1, le=10, description="账户失败阈值")
     rate_limit_cooldown_seconds: int = Field(default=3600, ge=3600, le=43200, description="429冷却时间（秒）")
-    session_cache_ttl_seconds: int = Field(default=3600, ge=300, le=86400, description="会话缓存时间（秒）")
+    session_cache_ttl_seconds: int = Field(default=3600, ge=0, le=86400, description="会话缓存时间（秒，0表示禁用缓存）")
     auto_refresh_accounts_seconds: int = Field(default=60, ge=0, le=600, description="自动刷新账号间隔（秒，0禁用）")
 
 
@@ -107,6 +119,7 @@ class AppConfig(BaseModel):
     # 业务配置（环境变量 > YAML > 默认值）
     basic: BasicConfig
     image_generation: ImageGenerationConfig
+    video_generation: VideoGenerationConfig = Field(default_factory=VideoGenerationConfig)
     retry: RetryConfig
     public_display: PublicDisplayConfig
     session: SessionConfig
@@ -196,6 +209,11 @@ class ConfigManager:
             **yaml_data.get("image_generation", {})
         )
 
+        # 加载视频生成配置
+        video_generation_config = VideoGenerationConfig(
+            **yaml_data.get("video_generation", {})
+        )
+
         # 加载重试配置，自动修正不在 1-12 小时范围内的值
         retry_data = yaml_data.get("retry", {})
         if "rate_limit_cooldown_seconds" in retry_data:
@@ -218,6 +236,7 @@ class ConfigManager:
             security=security_config,
             basic=basic_config,
             image_generation=image_generation_config,
+            video_generation=video_generation_config,
             retry=retry_config,
             public_display=public_display_config,
             session=session_config
@@ -324,6 +343,11 @@ class ConfigManager:
         return self._config.image_generation.output_format
 
     @property
+    def video_output_format(self) -> str:
+        """视频输出格式"""
+        return self._config.video_generation.output_format
+
+    @property
     def session_expire_hours(self) -> int:
         """Session过期时间（小时）"""
         return self._config.session.expire_hours
@@ -388,6 +412,10 @@ class _ConfigProxy:
     @property
     def image_generation(self):
         return config_manager.config.image_generation
+
+    @property
+    def video_generation(self):
+        return config_manager.config.video_generation
 
     @property
     def retry(self):

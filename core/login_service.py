@@ -56,6 +56,7 @@ class LoginService(BaseTaskService[LoginTask]):
             log_prefix="REFRESH",
         )
         self._is_polling = False
+        self._auto_refresh_paused = True  # 运行时开关：默认暂停（不自动刷新）
 
     async def start_login(self, account_ids: List[str]) -> LoginTask:
         """启动登录任务（支持排队）。"""
@@ -72,18 +73,8 @@ class LoginService(BaseTaskService[LoginTask]):
 
             task = LoginTask(id=str(uuid.uuid4()), account_ids=normalized)
             self._tasks[task.id] = task
-            self._append_log(task, "info", f"login task queued ({len(task.account_ids)} accounts)")
+            self._append_log(task, "info", f"📝 创建刷新任务 (账号数量: {len(task.account_ids)})")
             await self._enqueue_task(task)
-            if self._current_task_id:
-                current = self._tasks.get(self._current_task_id)
-                if current and current.status == TaskStatus.RUNNING:
-                    raise ValueError("已有刷新任务正在运行中")
-
-            task = LoginTask(id=str(uuid.uuid4()), account_ids=account_ids)
-            self._tasks[task.id] = task
-            self._current_task_id = task.id
-            self._append_log(task, "info", f"📝 创建刷新任务 (账号数量: {len(account_ids)})")
-            asyncio.create_task(self._run_login_async(task))
             return task
 
     def _execute_task(self, task: LoginTask):
@@ -94,13 +85,14 @@ class LoginService(BaseTaskService[LoginTask]):
         loop = asyncio.get_running_loop()
         self._append_log(task, "info", f"🚀 刷新任务已启动 (共 {len(task.account_ids)} 个账号)")
 
-        for account_id in task.account_ids:
+        for idx, account_id in enumerate(task.account_ids, 1):
+            # 检查是否请求取消
             if task.cancel_requested:
                 self._append_log(task, "warning", f"login task cancelled: {task.cancel_reason or 'cancelled'}")
                 task.status = TaskStatus.CANCELLED
                 task.finished_at = time.time()
                 return
-        for idx, account_id in enumerate(task.account_ids, 1):
+
             try:
                 self._append_log(task, "info", f"📊 进度: {idx}/{len(task.account_ids)}")
                 self._append_log(task, "info", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
@@ -333,7 +325,11 @@ class LoginService(BaseTaskService[LoginTask]):
         logger.info("[LOGIN] refresh polling started (interval: 30 minutes)")
         try:
             while self._is_polling:
-                await self.check_and_refresh()
+                # 检查运行时开关
+                if not self._auto_refresh_paused:
+                    await self.check_and_refresh()
+                else:
+                    logger.debug("[LOGIN] auto-refresh paused, skipping check")
                 await asyncio.sleep(1800)
         except asyncio.CancelledError:
             logger.info("[LOGIN] polling stopped")
@@ -341,6 +337,23 @@ class LoginService(BaseTaskService[LoginTask]):
             logger.error("[LOGIN] polling error: %s", exc)
         finally:
             self._is_polling = False
+
+    def pause_auto_refresh(self) -> None:
+        """暂停自动刷新（不保存到数据库，重启后恢复）"""
+        self._auto_refresh_paused = True
+        logger.info("[LOGIN] auto-refresh paused (runtime only)")
+
+    def resume_auto_refresh(self) -> None:
+        """恢复自动刷新"""
+        was_paused = self._auto_refresh_paused
+        self._auto_refresh_paused = False
+        logger.info("[LOGIN] auto-refresh resumed")
+        # 如果是从暂停状态恢复，返回 True 表示需要立即检查
+        return was_paused
+
+    def is_auto_refresh_paused(self) -> bool:
+        """获取自动刷新暂停状态"""
+        return self._auto_refresh_paused
 
     def stop_polling(self) -> None:
         self._is_polling = False

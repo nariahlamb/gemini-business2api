@@ -89,7 +89,17 @@
         >
           添加账户
         </button>
-        
+
+        <button
+          class="rounded-full border border-border px-4 py-2 text-sm font-medium transition-colors"
+          :class="autoRefreshPaused
+            ? 'border-border bg-background text-foreground hover:border-primary hover:text-primary'
+            : 'border-primary bg-primary text-primary-foreground hover:opacity-90'"
+          @click="toggleAutoRefresh"
+        >
+          自动刷新
+        </button>
+
         <div ref="moreActionsRef" class="relative">
           <button
             class="flex items-center gap-2 rounded-full border border-input bg-background px-4 py-2 text-sm font-medium
@@ -208,22 +218,25 @@
               <p class="text-xs text-muted-foreground">账号 ID</p>
               <p class="mt-1 font-mono text-xs text-foreground">{{ account.id }}</p>
             </div>
-            <div class="flex items-center gap-2">
-              <Checkbox
-                :modelValue="selectedIds.has(account.id)"
-                @update:modelValue="toggleSelect(account.id)"
-                @click.stop
-              />
-              <span
-                class="inline-flex items-center rounded-full border border-border px-3 py-1 text-xs"
-                :class="statusClass(account)"
-              >
-                {{ statusLabel(account) }}
-              </span>
-            </div>
+            <Checkbox
+              :modelValue="selectedIds.has(account.id)"
+              @update:modelValue="toggleSelect(account.id)"
+              @click.stop
+            />
           </div>
 
           <div class="mt-4 grid grid-cols-2 gap-3 text-xs text-muted-foreground">
+            <div>
+              <p>状态</p>
+              <p class="mt-1 text-sm font-semibold text-foreground">
+                <span
+                  class="inline-flex items-center rounded-full border border-border px-2 py-0.5 text-xs"
+                  :class="statusClass(account)"
+                >
+                  {{ statusLabel(account) }}
+                </span>
+              </p>
+            </div>
             <div>
               <p>剩余时间</p>
               <p class="mt-1 text-sm font-semibold" :class="remainingClass(account)">
@@ -232,6 +245,13 @@
               <p v-if="account.expires_at" class="mt-1 text-[11px]">
                 {{ account.expires_at }}
               </p>
+            </div>
+            <div>
+              <p>配额</p>
+              <div class="mt-1">
+                <QuotaBadge v-if="account.quota_status" :quota-status="account.quota_status" />
+                <span v-else class="text-xs text-muted-foreground">-</span>
+              </div>
             </div>
             <div>
               <p>冷却</p>
@@ -310,6 +330,7 @@
                   <HelpTip text="过期时间为 12 小时，账户过期以北京时间为准。" />
                 </span>
               </th>
+              <th class="py-3 pr-6">配额</th>
               <th class="py-3 pr-6">冷却</th>
               <th class="py-3 pr-6">失败数</th>
               <th class="py-3 pr-6">会话数</th>
@@ -318,7 +339,7 @@
           </thead>
           <tbody class="text-sm text-foreground">
             <tr v-if="!filteredAccounts.length && !isLoading">
-              <td colspan="8" class="py-8 text-center text-muted-foreground">
+              <td colspan="9" class="py-8 text-center text-muted-foreground">
                 暂无账号数据，请检查后台配置。
               </td>
             </tr>
@@ -353,6 +374,10 @@
                 <span v-if="account.expires_at" class="block text-[11px] text-muted-foreground">
                   {{ account.expires_at }}
                 </span>
+              </td>
+              <td class="py-4 pr-6">
+                <QuotaBadge v-if="account.quota_status" :quota-status="account.quota_status" />
+                <span v-else class="text-xs text-muted-foreground">-</span>
               </td>
               <td class="py-4 pr-6 text-xs">
                 <span v-if="account.cooldown_seconds > 0" :class="cooldownClass(account)">
@@ -820,10 +845,11 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
-import { useAccountsStore } from '@/stores'
+import { useAccountsStore } from '@/stores/accounts'
 import SelectMenu from '@/components/ui/SelectMenu.vue'
 import Checkbox from '@/components/ui/Checkbox.vue'
 import ConfirmDialog from '@/components/ui/ConfirmDialog.vue'
+import QuotaBadge from '@/components/QuotaBadge.vue'
 import { useConfirmDialog } from '@/composables/useConfirmDialog'
 import { useToast } from '@/composables/useToast'
 import HelpTip from '@/components/ui/HelpTip.vue'
@@ -859,8 +885,9 @@ const showMoreActions = ref(false)
 const moreActionsRef = ref<HTMLDivElement | null>(null)
 const lastRegisterTaskId = ref<string | null>(null)
 const lastLoginTaskId = ref<string | null>(null)
-const registerLogClearOffset = ref(0)
-const loginLogClearOffset = ref(0)
+type TaskLogLine = { time: string; level: string; message: string }
+const registerLogClearMarker = ref<TaskLogLine | null>(null)
+const loginLogClearMarker = ref<TaskLogLine | null>(null)
 const registerAgreed = ref(false)
 const registerTask = ref<RegisterTask | null>(null)
 const loginTask = ref<LoginTask | null>(null)
@@ -869,6 +896,7 @@ const isRegistering = ref(false)
 const isRefreshing = ref(false)
 const isBulkOperating = ref(false)
 const automationError = ref('')
+const autoRefreshPaused = ref(true)  // 自动刷新暂停状态（默认暂停）
 const REGISTER_TASK_CACHE_KEY = 'accounts-register-task-cache'
 const LOGIN_TASK_CACHE_KEY = 'accounts-login-task-cache'
 const REGISTER_CLEAR_KEY = 'accounts-register-log-clear'
@@ -925,6 +953,33 @@ const refreshAccounts = async () => {
   showMoreActions.value = false
 }
 
+// 加载自动刷新状态
+const loadAutoRefreshStatus = async () => {
+  try {
+    const response = await accountsApi.getAutoRefreshStatus()
+    autoRefreshPaused.value = response.paused
+  } catch (error: any) {
+    console.error('Failed to load auto-refresh status:', error)
+  }
+}
+
+// 切换自动刷新状态
+const toggleAutoRefresh = async () => {
+  try {
+    if (autoRefreshPaused.value) {
+      await accountsApi.resumeAutoRefresh()
+      autoRefreshPaused.value = false
+      toast.success('自动刷新已恢复')
+    } else {
+      await accountsApi.pauseAutoRefresh()
+      autoRefreshPaused.value = true
+      toast.warning('自动刷新已暂停（重启默认关闭）')
+    }
+  } catch (error: any) {
+    toast.error(error.message || '切换失败')
+  }
+}
+
 const readCachedTask = <T,>(key: string): T | null => {
   try {
     const raw = localStorage.getItem(key)
@@ -950,15 +1005,34 @@ const removeCachedTask = (key: string) => {
   }
 }
 
-const readClearOffset = (key: string) => {
+const readClearMarker = (key: string): TaskLogLine | null => {
   const raw = localStorage.getItem(key)
-  const value = Number(raw)
-  return Number.isFinite(value) ? value : 0
+  if (!raw) return null
+
+  // Backward compatibility: older versions stored numeric offsets.
+  // If we see a number, ignore it so logs still render.
+  const asNumber = Number(raw)
+  if (Number.isFinite(asNumber)) return null
+
+  try {
+    const parsed = JSON.parse(raw) as Partial<TaskLogLine> | null
+    if (!parsed || typeof parsed !== 'object') return null
+    if (typeof parsed.time !== 'string' || typeof parsed.level !== 'string' || typeof parsed.message !== 'string') {
+      return null
+    }
+    return { time: parsed.time, level: parsed.level, message: parsed.message }
+  } catch {
+    return null
+  }
 }
 
-const writeClearOffset = (key: string, value: number) => {
+const writeClearMarker = (key: string, value: TaskLogLine | null) => {
   try {
-    localStorage.setItem(key, String(value))
+    if (!value) {
+      localStorage.removeItem(key)
+      return
+    }
+    localStorage.setItem(key, JSON.stringify(value))
   } catch {
     // ignore storage errors
   }
@@ -968,10 +1042,10 @@ const syncRegisterTask = (task: RegisterTask | null, persist = true) => {
   if (!task) {
     registerTask.value = null
     lastRegisterTaskId.value = null
-    registerLogClearOffset.value = 0
+    registerLogClearMarker.value = null
     if (persist) {
       removeCachedTask(REGISTER_TASK_CACHE_KEY)
-      writeClearOffset(REGISTER_CLEAR_KEY, 0)
+      writeClearMarker(REGISTER_CLEAR_KEY, null)
     }
     return
   }
@@ -989,8 +1063,8 @@ const syncRegisterTask = (task: RegisterTask | null, persist = true) => {
   registerTask.value = task
   if (task.id && task.id !== lastRegisterTaskId.value) {
     lastRegisterTaskId.value = task.id
-    registerLogClearOffset.value = 0
-    writeClearOffset(REGISTER_CLEAR_KEY, 0)
+    registerLogClearMarker.value = null
+    writeClearMarker(REGISTER_CLEAR_KEY, null)
   }
   if (persist) {
     writeCachedTask(REGISTER_TASK_CACHE_KEY, task)
@@ -1001,10 +1075,10 @@ const syncLoginTask = (task: LoginTask | null, persist = true) => {
   if (!task) {
     loginTask.value = null
     lastLoginTaskId.value = null
-    loginLogClearOffset.value = 0
+    loginLogClearMarker.value = null
     if (persist) {
       removeCachedTask(LOGIN_TASK_CACHE_KEY)
-      writeClearOffset(LOGIN_CLEAR_KEY, 0)
+      writeClearMarker(LOGIN_CLEAR_KEY, null)
     }
     return
   }
@@ -1022,8 +1096,8 @@ const syncLoginTask = (task: LoginTask | null, persist = true) => {
   loginTask.value = task
   if (task.id && task.id !== lastLoginTaskId.value) {
     lastLoginTaskId.value = task.id
-    loginLogClearOffset.value = 0
-    writeClearOffset(LOGIN_CLEAR_KEY, 0)
+    loginLogClearMarker.value = null
+    writeClearMarker(LOGIN_CLEAR_KEY, null)
   }
   if (persist) {
     writeCachedTask(LOGIN_TASK_CACHE_KEY, task)
@@ -1031,8 +1105,8 @@ const syncLoginTask = (task: LoginTask | null, persist = true) => {
 }
 
 const hydrateTaskCache = () => {
-  registerLogClearOffset.value = readClearOffset(REGISTER_CLEAR_KEY)
-  loginLogClearOffset.value = readClearOffset(LOGIN_CLEAR_KEY)
+  registerLogClearMarker.value = readClearMarker(REGISTER_CLEAR_KEY)
+  loginLogClearMarker.value = readClearMarker(LOGIN_CLEAR_KEY)
   const cachedRegister = readCachedTask<RegisterTask>(REGISTER_TASK_CACHE_KEY)
   if (cachedRegister) {
     if (cachedRegister.status !== 'cancelled') {
@@ -1271,12 +1345,26 @@ const closeTaskModal = () => {
 }
 
 const clearTaskLogs = () => {
-  // 仅“清空显示日志”：通过 offset 让新日志继续实时显示
-  registerLogClearOffset.value = registerTask.value?.logs?.length || 0
-  loginLogClearOffset.value = loginTask.value?.logs?.length || 0
-  writeClearOffset(REGISTER_CLEAR_KEY, registerLogClearOffset.value)
-  writeClearOffset(LOGIN_CLEAR_KEY, loginLogClearOffset.value)
+  // 仅“清空显示日志”：使用“最后一条日志标记”来过滤展示，避免后端截断 logs 时 offset 失效
+  const regLogs = (registerTask.value?.logs || []) as TaskLogLine[]
+  const loginLogsRaw = (loginTask.value?.logs || []) as TaskLogLine[]
+  registerLogClearMarker.value = regLogs.length ? regLogs[regLogs.length - 1] : null
+  loginLogClearMarker.value = loginLogsRaw.length ? loginLogsRaw[loginLogsRaw.length - 1] : null
+  writeClearMarker(REGISTER_CLEAR_KEY, registerLogClearMarker.value)
+  writeClearMarker(LOGIN_CLEAR_KEY, loginLogClearMarker.value)
   automationError.value = ''
+}
+
+const filterLogsAfterMarker = (logs: TaskLogLine[], marker: TaskLogLine | null) => {
+  if (!marker) return logs
+  for (let i = logs.length - 1; i >= 0; i -= 1) {
+    const item = logs[i]
+    if (item.time === marker.time && item.level === marker.level && item.message === marker.message) {
+      return logs.slice(i + 1)
+    }
+  }
+  // Marker not found (e.g., backend truncates to last N logs) — show current logs so new logs keep appearing.
+  return logs
 }
 
 const cancelRegister = async (taskId: string) => {
@@ -1319,19 +1407,18 @@ onMounted(async () => {
   hydrateTaskCache()
   await refreshAccounts()
   await loadCurrentTasks()
+  await loadAutoRefreshStatus()  // 加载自动刷新状态
   startBackgroundTaskPolling()
   document.addEventListener('click', handleMoreActionsClick)
 })
 
 const registerLogs = computed(() => {
   const logs = registerTask.value?.logs || []
-  if (!registerLogClearOffset.value) return logs
-  return logs.slice(registerLogClearOffset.value)
+  return filterLogsAfterMarker(logs as TaskLogLine[], registerLogClearMarker.value)
 })
 const loginLogs = computed(() => {
   const logs = loginTask.value?.logs || []
-  if (!loginLogClearOffset.value) return logs
-  return logs.slice(loginLogClearOffset.value)
+  return filterLogsAfterMarker(logs as TaskLogLine[], loginLogClearMarker.value)
 })
 const hasTaskData = computed(() =>
   Boolean(automationError.value) ||
